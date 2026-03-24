@@ -43,6 +43,13 @@ updates:
     commit-message:
       prefix: "ci"
       include: "scope"
+    groups:
+      ci-actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   # Enable version updates for Docker
   - package-ecosystem: "docker"
