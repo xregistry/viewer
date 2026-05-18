@@ -54,6 +54,42 @@ app.use((req, res, next) => {
   next();
 });
 
+// Strip tracking/decoration debris (Outlook Safe Links "&SLSync=Y", UTM tags,
+// ad click IDs, etc.) from both the path and the query string, then 302 to
+// the cleaned URL. Outlook in particular has a habit of concatenating
+// "&SLSync=Y" directly into the path, producing URLs like "/viewer/&SLSync=Y".
+const TRACKING_PARAMS = new Set([
+  'slsync',
+  'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+  'fbclid', 'gclid', 'msclkid', 'mc_cid', 'mc_eid', 'igshid', 'oly_anon_id',
+  '_hsenc', '_hsmi'
+]);
+
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+
+  const originalPath = req.path;
+  // Drop any "&KEY=VALUE" fragments that got pasted into the path.
+  const cleanedPath = originalPath.replace(/&[A-Za-z0-9_.-]+=[^/?#&]*/g, '');
+
+  const cleanedQuery = {};
+  let queryMutated = false;
+  for (const [k, v] of Object.entries(req.query || {})) {
+    if (TRACKING_PARAMS.has(k.toLowerCase())) {
+      queryMutated = true;
+      continue;
+    }
+    cleanedQuery[k] = v;
+  }
+
+  if (cleanedPath !== originalPath || queryMutated) {
+    const qs = new URLSearchParams(cleanedQuery).toString();
+    const target = (cleanedPath || '/') + (qs ? `?${qs}` : '');
+    return res.redirect(302, target);
+  }
+  next();
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({
