@@ -43,7 +43,7 @@
                 size="small">
               </app-deprecation-indicator>
             </div>
-            <a [routerLink]="[res['id']]" class="tile">
+            <a [routerLink]="resourceRoute(res['id'])" class="tile">
               View Details
             </a>
             <span *ngIf="res['versionsCount'] > 1" class="version-badge"

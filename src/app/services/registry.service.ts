@@ -172,6 +172,10 @@ export class RegistryService {
     return `${groupType}|${groupId}|${resourceType}${resourceId ? '|' + resourceId : ''}`;
   }
 
+  private buildPath(...segments: string[]): string {
+    return `/${segments.map(segment => encodeURIComponent(segment)).join('/')}`;
+  }
+
   /**
    * Constructs the API URL based on the resource path and whether we're using a proxy
    */
@@ -222,7 +226,7 @@ export class RegistryService {
     pageRel: string = '',
     filter?: string
   ): Observable<Page<ResourceDocument[]>> {
-    const pagePath = pageRel || `/${groupType}/${groupId}/${resourceType}`;
+    const pagePath = pageRel || this.buildPath(groupType, groupId, resourceType);
     return from(this.listResourcesAsync(groupType, groupId, resourceType, pagePath, filter));
   }
 
@@ -427,7 +431,7 @@ export class RegistryService {
     // Try each API until we find one that works
     for (const api of apisToTry) {
       try {
-        const url = this.getApiUrl(api, `/${groupType}/${groupId}`);
+        const url = this.getApiUrl(api, this.buildPath(groupType, groupId));
         const group = await lastValueFrom(
           this.httpGetWithRetry<Group>(url).pipe(
             map(response => response.body as Group)
@@ -642,7 +646,8 @@ export class RegistryService {
     pageRel: string = '',
     filter?: string
   ): Observable<Page<ResourceDocument[]>> {
-    const pagePath = pageRel || `/${groupType}/${groupId}/${resourceType}/${resourceId}/versions`;
+    const pagePath = pageRel ||
+      `${this.buildPath(groupType, groupId, resourceType, resourceId)}/versions`;
     return from(
       this.listResourceVersionsAsync(
         groupType,
@@ -820,9 +825,9 @@ export class RegistryService {
     };
 
     // Include version-related information
-    if (entry.versionscount) resource.versionscount = entry.versionscount;
-    if (entry.versionsurl) resource.versionsurl = entry.versionsurl;
-    if (entry.meta?.defaultversionid) resource.defaultversionid = entry.meta.defaultversionid;
+    if (entry.versionscount != null) resource.versionscount = entry.versionscount;
+    if (entry.versionsurl != null) resource.versionsurl = entry.versionsurl;
+    if (entry.meta?.defaultversionid != null) resource.defaultversionid = entry.meta.defaultversionid;
 
     // Include counts and URLs
     Object.keys(entry).forEach(key => {
@@ -834,7 +839,7 @@ export class RegistryService {
     // Include metadata attributes
     if (entry.meta) {
       Object.keys(entry.meta).forEach(key => {
-        if (!resource[key]) {
+        if (resource[key] === undefined) {
           resource[key] = entry.meta[key];
         }
       });
@@ -857,7 +862,7 @@ export class RegistryService {
           'modifiedat',
           'meta',
         ].includes(key) &&
-        !resource[key]
+        resource[key] === undefined
       ) {
         resource[key] = entry[key];
       }
@@ -1146,9 +1151,9 @@ export class RegistryService {
     for (const api of apisToTry) {
       try {
         // Construct base path depending on whether this is for a version or resource
-        let basePath = `/${groupType}/${groupId}/${resourceType}/${resourceId}`;
+        let basePath = this.buildPath(groupType, groupId, resourceType, resourceId);
         if (versionId) {
-          basePath += `/versions/${versionId}`;
+          basePath += `/versions/${encodeURIComponent(versionId)}`;
         }
 
         // Construct URLs for regular and $details endpoints
@@ -1303,7 +1308,7 @@ export class RegistryService {
    * @param filter optional filter string to apply to the query
    */
   listGroups(groupType: string, pageRel: string = '', filter?: string): Observable<Page<Group[]>> {
-    const pagePath = pageRel || `/${groupType}`;
+    const pagePath = pageRel || this.buildPath(groupType);
     return from(this.listGroupsAsync(groupType, pagePath, filter));
   }
 
