@@ -1,8 +1,9 @@
 import { Component, Input, OnInit, CUSTOM_ELEMENTS_SCHEMA } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { RouterModule } from '@angular/router';
+import { Router, RouterModule } from '@angular/router';
 import { truncateText, truncateDescription, formatDateShort, getFullText } from '../../utils/text.utils';
 import { DebugService } from '../../services/debug.service';
+import { buildEncodedRoute } from '../../utils/route.utils';
 
 @Component({
   // Use a property selector instead of an element selector
@@ -27,7 +28,20 @@ export class ResourceRowComponent implements OnInit {
   formatDateShort = formatDateShort;
   getFullText = getFullText;
 
-  constructor(private debug: DebugService) {}
+  constructor(
+    private debug: DebugService,
+    private router: Router
+  ) {}
+
+  resourceRoute() {
+    return buildEncodedRoute(
+      this.router,
+      this.groupType,
+      this.groupId,
+      this.resourceType,
+      this.resource?.id || this.resource?.name || ''
+    );
+  }
 
   ngOnInit(): void {
     // Debug: Log the resource to see what data is available

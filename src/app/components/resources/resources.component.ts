@@ -19,6 +19,7 @@ import { LoadingIndicatorComponent } from '../loading-indicator/loading-indicato
 import { EmptyStateComponent } from '../empty-state/empty-state.component';
 import { ErrorBoundaryComponent } from '../error-boundary/error-boundary.component';
 import { DeprecationIndicatorComponent } from '../deprecation-indicator/deprecation-indicator.component';
+import { buildEncodedRoute } from '../../utils/route.utils';
 
 @Component({
   standalone: true,
@@ -374,8 +375,18 @@ export class ResourcesComponent implements OnInit, OnDestroy, AfterViewInit {
       this.debug.log('ResourcesComponent: Auto-forwarding to single resource:', singleResource);
 
       // Navigate to the resource detail page
-      this.router.navigate([this.groupType, this.groupId, this.resourceType, singleResource.id]);
+      this.router.navigateByUrl(this.resourceRoute(singleResource.id));
     }
+  }
+
+  resourceRoute(resourceId: string) {
+    return buildEncodedRoute(
+      this.router,
+      this.groupType,
+      this.groupId,
+      this.resourceType,
+      resourceId
+    );
   }
 
   /**

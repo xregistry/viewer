@@ -75,6 +75,35 @@ describe('RegistryService', () => {
     expect(service).toBeTruthy();
   });
 
+  it('should encode slash-containing identifiers as individual path segments', () => {
+    expect((service as any).buildPath(
+      'huggingfaceregistries',
+      'hub',
+      'models',
+      'org/model'
+    )).toBe('/huggingfaceregistries/hub/models/org%2Fmodel');
+  });
+
+  it('should preserve generic version metadata and non-SemVer identifiers', () => {
+    const entry = {
+      versionid: 'a3f18c9107d2f8f90ad3c0d9e8026a85c12e640b',
+      versionscount: 0,
+      gated: false,
+      distributions: [{ platform: 'linux/amd64', url: 'https://example.test/blob' }]
+    };
+    const result = (service as any).processResourceResponse(
+      entry,
+      { singular: 'version', attributes: {} },
+      'https://test-api.myregistry.example.com',
+      false
+    );
+
+    expect(result.id).toBe(entry.versionid);
+    expect(result.versionscount).toBe(0);
+    expect(result.gated).toBe(false);
+    expect(result.distributions).toEqual(entry.distributions);
+  });
+
   it('should throw proper 404 errors when all endpoints return 404', () => {
     // This test validates that the fetchResourceDetailsAsync method properly
     // tracks 404 errors and throws appropriate errors when all endpoints return 404.

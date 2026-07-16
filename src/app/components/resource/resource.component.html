@@ -57,7 +57,7 @@
               </app-deprecation-indicator>
             </div>
             <div class="origin-field" *ngIf="defaultVersion.origin">Origin: {{ defaultVersion.origin }}</div>
-            <a [routerLink]="['versions', defaultVersion['versionid']]" class="btn-view">View Version Details</a>
+            <a [routerLink]="versionRoute(defaultVersion['versionid'])" class="btn-view">View Version Details</a>
             <app-resource-document
               [resourceDocument]="defaultVersion"
               [resourceType]="resourceType"
@@ -127,7 +127,7 @@
                 <div class="version-meta">
                   <small>Modified: {{ (v.modifiedAt || v.modifiedat) | date:'short' }}</small>
                 </div>
-                <a [routerLink]="['versions', v['versionid']]" class="btn-view-compact">View</a>
+                <a [routerLink]="versionRoute(v['versionid'])" class="btn-view-compact">View</a>
               </div>              <app-empty-state
                 *ngIf="filteredVersionsList.length === 0 && versionsList.length > 0"
                 type="info"
