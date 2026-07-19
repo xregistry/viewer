@@ -9,6 +9,8 @@ import { ConfigService } from '../../services/config.service';
 import { ModelService } from '../../services/model.service';
 import { IconComponent } from '../icon/icon.component';
 import { PLATFORM_ID, CUSTOM_ELEMENTS_SCHEMA } from '@angular/core';
+import { By } from '@angular/platform-browser';
+import { PageHeaderComponent } from '../page-header/page-header.component';
 
 describe('GroupsComponent', () => {
   let component: GroupsComponent;
@@ -54,5 +56,18 @@ describe('GroupsComponent', () => {
 
   it('should create', () => {
     expect(component).toBeTruthy();
+  });
+
+  it('shows pagination controls when the server returns a next link', () => {
+    component.useClientSidePagination = false;
+    component.pageLinks = {
+      next: 'https://registry.example.test/goregistries?offset=50&limit=50'
+    };
+
+    fixture.detectChanges();
+
+    const header = fixture.debugElement.query(By.directive(PageHeaderComponent))
+      .componentInstance as PageHeaderComponent;
+    expect(header.showPagination).toBe(true);
   });
 });
