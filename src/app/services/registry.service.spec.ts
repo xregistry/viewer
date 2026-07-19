@@ -6,6 +6,7 @@ import { RegistryService } from './registry.service';
 import { ConfigService } from './config.service';
 import { ModelService } from './model.service';
 import { PLATFORM_ID } from '@angular/core';
+import { RegistryModel } from '../models/registry.model';
 
 describe('RegistryService', () => {
   let service: RegistryService;
@@ -116,11 +117,17 @@ describe('RegistryService', () => {
   });
 
   it('preserves initial group pagination links for a single API', async () => {
-    modelServiceSpy.getRegistryModel.mockReturnValue(of({
+    const model: RegistryModel = {
+      capabilities: { apis: [], schemas: [], pagination: true },
       groups: {
-        goregistries: { singular: 'goregistry', attributes: {} }
+        goregistries: {
+          singular: 'goregistry',
+          attributes: {},
+          resources: {}
+        }
       }
-    } as never));
+    };
+    modelServiceSpy.getRegistryModel.mockReturnValue(of(model));
     modelServiceSpy.getApiEndpointsForGroupType.mockReturnValue([
       'https://test-api.myregistry.example.com'
     ]);
