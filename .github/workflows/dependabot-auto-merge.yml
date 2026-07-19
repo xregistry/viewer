@@ -1,0 +1,210 @@
+name: Dependabot Auto Merge
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  github-actions-gate-and-automerge:
+    name: GitHub Actions Gate And Enable Auto Merge
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.state == 'open' && !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply low-risk label gate
+        id: gate
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pull_number = context.payload.pull_request.number;
+            const label = 'automerge-safe';
+
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+            } catch (error) {
+              if (error.status === 404) {
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name: label,
+                  color: '1d76db',
+                  description: 'Low-risk Dependabot updates eligible for auto-merge',
+                });
+                core.info(`Created ${label} label`);
+              } else {
+                throw error;
+              }
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number,
+              per_page: 100,
+            });
+
+            const changedFiles = files.map((f) => f.filename);
+            const workflowOnly = changedFiles.length > 0 && changedFiles.every((f) => f.startsWith('.github/workflows/'));
+
+            const title = context.payload.pull_request.title || '';
+            const semverMatch = title.match(/ from (\d+(?:\.\d+){0,2}) to (\d+(?:\.\d+){0,2})/i);
+            const fromMajor = semverMatch ? semverMatch[1].split('.')[0] : null;
+            const toMajor = semverMatch ? semverMatch[2].split('.')[0] : null;
+            const nonMajorUpdate = Boolean(semverMatch && fromMajor === toMajor);
+
+            const isLowRisk = workflowOnly && nonMajorUpdate;
+
+            const existingLabels = (context.payload.pull_request.labels || []).map((l) => l.name);
+            const hasLabel = existingLabels.includes(label);
+
+            if (isLowRisk && !hasLabel) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number: pull_number, labels: [label] });
+              core.info(`Added ${label} label to PR #${pull_number}`);
+            }
+
+            if (!isLowRisk && hasLabel) {
+              try {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: pull_number, name: label });
+                core.info(`Removed ${label} label from PR #${pull_number}`);
+              } catch (error) {
+                core.warning(`Could not remove ${label}: ${error.message}`);
+              }
+            }
+
+            core.info(`Gate result for PR #${pull_number}: workflowOnly=${workflowOnly}, nonMajorUpdate=${nonMajorUpdate}`);
+            core.setOutput('is_low_risk', isLowRisk ? 'true' : 'false');
+
+      - name: Enable auto-merge
+        if: steps.gate.outputs.is_low_risk == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const pullRequestId = context.payload.pull_request.node_id;
+
+            try {
+              await github.graphql(
+                `mutation($pullRequestId: ID!) {
+                  enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: SQUASH}) {
+                    pullRequest {
+                      number
+                      autoMergeRequest {
+                        enabledAt
+                      }
+                    }
+                  }
+                }`,
+                { pullRequestId }
+              );
+              core.info(`Enabled auto-merge for PR #${context.payload.pull_request.number}`);
+            } catch (error) {
+              const message = error && error.message ? error.message : String(error);
+              if (message.includes('already enabled')) {
+                core.info(`Auto-merge already enabled for PR #${context.payload.pull_request.number}`);
+                return;
+              }
+              throw error;
+            }
+
+  npm-dev-gate-and-automerge:
+    name: NPM DevDependencies Gate And Enable Auto Merge
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.state == 'open' && !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apply npm low-risk label gate
+        id: gate
+        if: steps.metadata.outputs.package-ecosystem == 'npm'
+        uses: actions/github-script@v8
+        env:
+          DEPENDENCY_TYPE: ${{ steps.metadata.outputs.dependency-type }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pull_number = context.payload.pull_request.number;
+            const label = 'automerge-safe';
+
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+            } catch (error) {
+              if (error.status === 404) {
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name: label,
+                  color: '1d76db',
+                  description: 'Low-risk Dependabot updates eligible for auto-merge',
+                });
+                core.info(`Created ${label} label`);
+              } else {
+                throw error;
+              }
+            }
+
+            const dependencyType = process.env.DEPENDENCY_TYPE || '';
+            const updateType = process.env.UPDATE_TYPE || '';
+            const isDevDependency = dependencyType === 'direct:development';
+            const isMinorOrPatch = updateType === 'version-update:semver-minor' || updateType === 'version-update:semver-patch';
+            const isLowRisk = isDevDependency && isMinorOrPatch;
+
+            const existingLabels = (context.payload.pull_request.labels || []).map((l) => l.name);
+            const hasLabel = existingLabels.includes(label);
+
+            if (isLowRisk && !hasLabel) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number: pull_number, labels: [label] });
+              core.info(`Added ${label} label to PR #${pull_number}`);
+            }
+
+            if (!isLowRisk && hasLabel) {
+              try {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: pull_number, name: label });
+                core.info(`Removed ${label} label from PR #${pull_number}`);
+              } catch (error) {
+                core.warning(`Could not remove ${label}: ${error.message}`);
+              }
+            }
+
+            core.info(`NPM gate result for PR #${pull_number}: dependencyType=${dependencyType}, updateType=${updateType}, isLowRisk=${isLowRisk}`);
+            core.setOutput('is_low_risk', isLowRisk ? 'true' : 'false');
+
+      - name: Enable auto-merge
+        if: steps.gate.outputs.is_low_risk == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const pullRequestId = context.payload.pull_request.node_id;
+
+            try {
+              await github.graphql(
+                `mutation($pullRequestId: ID!) {
+                  enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: SQUASH}) {
+                    pullRequest {
+                      number
+                      autoMergeRequest {
+                        enabledAt
+                      }
+                    }
+                  }
+                }`,
+                { pullRequestId }
+              );
+              core.info(`Enabled auto-merge for PR #${context.payload.pull_request.number}`);
+            } catch (error) {
+              const message = error && error.message ? error.message : String(error);
+              if (message.includes('already enabled')) {
+                core.info(`Auto-merge already enabled for PR #${context.payload.pull_request.number}`);
+                return;
+              }
+              throw error;
+            }
