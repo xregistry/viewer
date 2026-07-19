@@ -84,6 +84,15 @@ describe('RegistryService', () => {
     )).toBe('/huggingfaceregistries/hub/models/org%2Fmodel');
   });
 
+  it('should preserve literal percent-encoded text in identifiers', () => {
+    expect((service as any).buildPath(
+      'goregistries',
+      'pkg.go.dev',
+      'modules',
+      '4d63.com%2Fcollapsewhitespace'
+    )).toBe('/goregistries/pkg.go.dev/modules/4d63.com%252Fcollapsewhitespace');
+  });
+
   it('should preserve generic version metadata and non-SemVer identifiers', () => {
     const entry = {
       versionid: 'a3f18c9107d2f8f90ad3c0d9e8026a85c12e640b',
