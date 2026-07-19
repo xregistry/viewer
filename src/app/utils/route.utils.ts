@@ -11,3 +11,7 @@ export function getPrimaryRouteSegment(
 ): string {
   return tree.root.children[PRIMARY_OUTLET]?.segments[index]?.path ?? fallback;
 }
+
+export function getPrimaryRouteSegments(tree: UrlTree): string[] {
+  return tree.root.children[PRIMARY_OUTLET]?.segments.map(segment => segment.path) ?? [];
+}

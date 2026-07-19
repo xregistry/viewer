@@ -1,5 +1,5 @@
 import { Component, OnInit, ViewEncapsulation, AfterViewInit, Inject, PLATFORM_ID, CUSTOM_ELEMENTS_SCHEMA } from '@angular/core';
-import { Router, NavigationEnd } from '@angular/router';
+import { Router, NavigationEnd, UrlTree } from '@angular/router';
 import { filter, map, switchMap, catchError, startWith } from 'rxjs/operators';
 import { Observable, of, forkJoin } from 'rxjs';
 import { CommonModule, isPlatformBrowser } from '@angular/common';
@@ -8,6 +8,7 @@ import { ModelService } from '../../services/model.service';
 import { RegistryService } from '../../services/registry.service';
 import { RoutePersistenceService } from '../../services/route-persistence.service';
 import { IconComponent } from '../icon/icon.component';
+import { buildEncodedRoute, getPrimaryRouteSegments } from '../../utils/route.utils';
 
 @Component({
   standalone: true,
@@ -19,7 +20,7 @@ import { IconComponent } from '../icon/icon.component';
   encapsulation: ViewEncapsulation.None // This is critical for global styles to be applied
 })
 export class BreadcrumbComponent implements OnInit, AfterViewInit {
-  breadcrumbs$!: Observable<{ label: string; url: string }[]>;
+  breadcrumbs$!: Observable<{ label: string; url: UrlTree }[]>;
   private isBrowser: boolean;
 
   constructor(
@@ -36,7 +37,7 @@ export class BreadcrumbComponent implements OnInit, AfterViewInit {
       filter(event => event instanceof NavigationEnd),
       startWith({ urlAfterRedirects: this.router.url } as NavigationEnd), // Trigger immediately with current URL
       switchMap(() => {
-        const segments = this.router.url.split('/').filter((seg: string) => seg);
+        const segments = getPrimaryRouteSegments(this.router.parseUrl(this.router.url));
 
         console.log('Breadcrumb: Building breadcrumbs for URL:', this.router.url, 'segments:', segments);
 
@@ -48,7 +49,7 @@ export class BreadcrumbComponent implements OnInit, AfterViewInit {
         return this.modelService.getRegistryModel().pipe(
           switchMap(model => {
             const observables = segments.map((seg: string, idx: number) => {
-              const url = '/' + segments.slice(0, idx + 1).join('/');
+              const url = buildEncodedRoute(this.router, ...segments.slice(0, idx + 1));
 
               try {
                 if (idx === 0) {
@@ -118,9 +119,9 @@ export class BreadcrumbComponent implements OnInit, AfterViewInit {
           catchError((error) => {
             // If model loading fails, create breadcrumbs from URL segments only
             console.warn('Breadcrumb: Model loading failed, using URL segments as labels:', error);
-            const segments = this.router.url.split('/').filter((seg: string) => seg);
+            const segments = getPrimaryRouteSegments(this.router.parseUrl(this.router.url));
             const fallbackBreadcrumbs = segments.map((seg: string, idx: number) => {
-              const url = '/' + segments.slice(0, idx + 1).join('/');
+              const url = buildEncodedRoute(this.router, ...segments.slice(0, idx + 1));
               return { label: seg, url };
             });
             console.log('Breadcrumb: Fallback breadcrumbs:', fallbackBreadcrumbs);
@@ -131,10 +132,11 @@ export class BreadcrumbComponent implements OnInit, AfterViewInit {
       catchError((error) => {
         // Final fallback - if everything fails, at least show the current page
         console.error('Breadcrumb: Complete failure, using current URL:', error);
-        const segments = this.router.url.split('/').filter((seg: string) => seg);
+        const currentTree = this.router.parseUrl(this.router.url);
+        const segments = getPrimaryRouteSegments(currentTree);
         if (segments.length > 0) {
           const lastSegment = segments[segments.length - 1];
-          return of([{ label: lastSegment, url: this.router.url }]);
+          return of([{ label: lastSegment, url: currentTree }]);
         }
         return of([]);      })
     );

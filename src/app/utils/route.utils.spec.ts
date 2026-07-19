@@ -1,6 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { DefaultUrlSerializer, provideRouter, Router } from '@angular/router';
-import { buildEncodedRoute, getPrimaryRouteSegment } from './route.utils';
+import { buildEncodedRoute, getPrimaryRouteSegment, getPrimaryRouteSegments } from './route.utils';
 
 describe('buildEncodedRoute', () => {
   let router: Router;
@@ -55,5 +55,8 @@ describe('buildEncodedRoute', () => {
       serializer.parse(serializer.serialize(literalPercentRoute)),
       3
     )).toBe('100%');
+    expect(getPrimaryRouteSegments(
+      serializer.parse(serializer.serialize(slashRoute))
+    )).toEqual(['groups', 'hub', 'models', 'org/model']);
   });
 });
