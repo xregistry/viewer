@@ -47,7 +47,7 @@
         <!-- Main content area -->
         <div class="main-content">          <div *ngIf="defaultVersion$ | async as defaultVersion" class="default-version-section">
             <div class="version-header-container">
-              <h3>Default Version: {{ defaultVersion['versionid'] }}</h3>
+              <h3>Default Version<span *ngIf="defaultVersion['versionid']">: {{ defaultVersion['versionid'] }}</span></h3>
               <!-- Deprecation indicator for the default version -->
               <app-deprecation-indicator
                 *ngIf="defaultVersion.deprecated || defaultVersion['deprecation']"
@@ -57,7 +57,9 @@
               </app-deprecation-indicator>
             </div>
             <div class="origin-field" *ngIf="defaultVersion.origin">Origin: {{ defaultVersion.origin }}</div>
-            <a [routerLink]="versionRoute(defaultVersion['versionid'])" class="btn-view">View Version Details</a>
+            <a *ngIf="defaultVersion['versionid']"
+               [routerLink]="versionRoute(defaultVersion['versionid'])"
+               class="btn-view">View Version Details</a>
             <app-resource-document
               [resourceDocument]="defaultVersion"
               [resourceType]="resourceType"
