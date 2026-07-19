@@ -2,7 +2,7 @@
   [title]="(modelService.getRegistryModel() | async)?.groups?.[groupType]?.plural || 'Registry Groups'"
   [showViewToggle]="true"
   [currentViewMode]="viewMode"
-  [showPagination]="useClientSidePagination"
+  [showPagination]="showPagination"
   [pageLinks]="pageLinks"
   [resultsCount]="filteredGroupsList.length || 0"
   [totalCount]="useClientSidePagination ? allGroupsCache.length || 0 : 0"

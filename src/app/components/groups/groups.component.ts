@@ -62,6 +62,11 @@ export class GroupsComponent implements OnInit, OnDestroy, AfterViewInit {
   // Pagination links object
   pageLinks: { [key: string]: string } = {};
 
+  get showPagination(): boolean {
+    return this.useClientSidePagination ||
+      ['first', 'prev', 'next', 'last'].some(relation => Boolean(this.pageLinks[relation]));
+  }
+
   // Utility functions for template
   truncateText = truncateText;
   truncateDescription = truncateDescription;
