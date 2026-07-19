@@ -1349,16 +1349,7 @@ export class RegistryService {
         const linkHeader = response.headers.get('Link') || '';
         this.debug.log(`Link header received for groups: ${linkHeader}`);
 
-        const links: any = {};
-        linkHeader.split(',').forEach(part => {
-          const match = part.trim().match(/<([^>]+)>;\s*rel="?([a-zA-Z0-9_-]+)"?/i);
-          if (match) {
-            links[match[2]] = match[1];
-            this.debug.log(`Found link relation: ${match[2]} -> ${match[1]}`);
-          } else {
-            this.debug.warn(`Failed to parse link header part: ${part}`);
-          }
-        });
+        const links = this.parseGroupLinkHeader(linkHeader);
 
         // Map entries to Group[]
         const meta = model.groups[groupType] || { singular: groupType, attributes: {} };
@@ -1393,6 +1384,7 @@ export class RegistryService {
           this.httpGetWithRetry<{ [id: string]: any }>(url)
         );
         const data = response.body || {};
+        const links = this.parseGroupLinkHeader(response.headers.get('Link') || '');
 
         // Map entries to Group[] with origin tracking
         const meta = model.groups[groupType] || { singular: groupType, attributes: {} };
@@ -1409,10 +1401,10 @@ export class RegistryService {
         });
 
         this.debug.log(`Successfully loaded ${groups.length} groups from ${api}`);
-        return { api, groups, success: true, error: null };
+        return { api, groups, links, success: true, error: null };
       } catch (err) {
         this.debug.error(`Failed to list groups from ${api}:`, err);
-        return { api, groups: [], success: false, error: err };
+        return { api, groups: [], links: {}, success: false, error: err };
       }
     });
 
@@ -1446,10 +1438,9 @@ export class RegistryService {
       this.debug.log(`Failed APIs (${failedApis.length}): ${failedApis.join(', ')}`);
     }
 
-    // For pagination links, we'll use the first successful API's pattern
-    // In a multi-API scenario, pagination becomes complex as each API has its own pagination
-    // For now, we disable pagination when merging multiple APIs
-    const links: any = {};
+    // A single API has one unambiguous pagination cursor. Multiple APIs have
+    // independent cursors, so merged pagination remains disabled.
+    const links = apis.length === 1 && results[0]?.success ? results[0].links : {};
 
     const result: Page<Group[]> = {
       items: allGroups,
@@ -1466,6 +1457,22 @@ export class RegistryService {
     }
 
     return result;
+  }
+
+  private parseGroupLinkHeader(linkHeader: string): { [key: string]: string } {
+    const links: { [key: string]: string } = {};
+    if (!linkHeader) return links;
+
+    linkHeader.split(',').forEach(part => {
+      const match = part.trim().match(/<([^>]+)>;\s*rel="?([a-zA-Z0-9_-]+)"?/i);
+      if (match) {
+        links[match[2]] = match[1];
+        this.debug.log(`Found link relation: ${match[2]} -> ${match[1]}`);
+      } else {
+        this.debug.warn(`Failed to parse link header part: ${part}`);
+      }
+    });
+    return links;
   }
 
 }
