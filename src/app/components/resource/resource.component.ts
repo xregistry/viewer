@@ -17,7 +17,7 @@ import { ErrorBoundaryComponent } from '../error-boundary/error-boundary.compone
 import { DeprecationIndicatorComponent } from '../deprecation-indicator/deprecation-indicator.component';
 import { CrossReferenceComponent } from '../cross-reference/cross-reference.component';
 import { UrlDebugComponent } from '../url-debug/url-debug.component';
-import { buildEncodedRoute } from '../../utils/route.utils';
+import { buildEncodedRoute, getPrimaryRouteSegment } from '../../utils/route.utils';
 
 @Component({
   selector: 'app-resource',
@@ -91,7 +91,11 @@ export class ResourceComponent implements OnInit, OnDestroy {
       this.groupType = params.get('groupType')!;
       this.groupId = params.get('groupId')!;
       this.resourceType = params.get('resourceType')!;
-      this.resourceId = params.get('resourceId')!;
+      this.resourceId = getPrimaryRouteSegment(
+        this.router.parseUrl(this.router.url),
+        3,
+        params.get('resourceId') ?? ''
+      );
 
       // Wait for configuration to be loaded before subscribing to ModelService
       this.waitForConfigAndLoadData();
