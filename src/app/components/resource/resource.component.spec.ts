@@ -9,6 +9,8 @@ import { ConfigService } from '../../services/config.service';
 import { ModelService } from '../../services/model.service';
 import { IconComponent } from '../icon/icon.component';
 import { PLATFORM_ID, CUSTOM_ELEMENTS_SCHEMA } from '@angular/core';
+import { By } from '@angular/platform-browser';
+import { EmptyStateComponent } from '../empty-state/empty-state.component';
 
 describe('ResourceComponent', () => {
   let component: ResourceComponent;
@@ -61,5 +63,19 @@ describe('ResourceComponent', () => {
 
   it('should create', () => {
     expect(component).toBeTruthy();
+  });
+
+  it('uses a registered icon for empty version history', () => {
+    component.loading = false;
+    component.hasError = false;
+    component.hasMultipleVersions = true;
+    component.versionsList = [];
+    component.filteredVersionsList = [];
+
+    fixture.detectChanges();
+
+    const emptyState = fixture.debugElement.query(By.directive(EmptyStateComponent))
+      .componentInstance as EmptyStateComponent;
+    expect(emptyState.iconName).toBe('clock');
   });
 });
