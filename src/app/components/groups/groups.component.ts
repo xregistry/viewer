@@ -53,6 +53,14 @@ export class GroupsComponent implements OnInit, OnDestroy, AfterViewInit {
   private initialLoad = true;
   private userHasChangedView = false; // Track if user manually changed view mode
 
+  // Tracks which API endpoints were known to contribute `groupType` the last
+  // time groups were loaded. Progressive model loading emits an update every
+  // time ANY endpoint finishes (including unrelated ones) and again once all
+  // endpoints are done; we only want to (re)load the groups collection when
+  // the group type first becomes available or the set of contributing
+  // endpoints actually changes - not on every completion update.
+  private loadedGroupTypeApis: string[] | null = null;
+
   // Client-side pagination for large datasets
   allGroupsCache: Group[] = [];
   private currentPage = 1;
@@ -61,6 +69,11 @@ export class GroupsComponent implements OnInit, OnDestroy, AfterViewInit {
 
   // Pagination links object
   pageLinks: { [key: string]: string } = {};
+
+  // Server-reported total item count for the current group type, when the
+  // (single-origin) response exposed an `X-Total-Count` header. Undefined
+  // for multi-origin listings, where no single coherent total exists.
+  serverTotalCount: number | undefined;
 
   // Utility functions for template
   truncateText = truncateText;
@@ -176,8 +189,19 @@ export class GroupsComponent implements OnInit, OnDestroy, AfterViewInit {
               this.debug.log('Extracted resourceTypes:', resourceTypes);
             }
 
-            // Load groups on initial model load or when model is complete
-            if (this.initialLoad || result.isComplete) {
+            // Load (or reload) groups only when the group type first becomes
+            // available, or when the set of API endpoints actually
+            // contributing this group type changes (e.g. a slower endpoint
+            // finishes loading and turns out to also serve this group type).
+            // Progressive model loading otherwise emits an update every time
+            // ANY endpoint finishes plus a final "isComplete" update; without
+            // this check those extra emissions would each re-trigger a full
+            // groups collection request.
+            const contributingApis = this.modelService.getApiEndpointsForGroupType(this.groupType);
+            const contributingApisChanged = this.haveContributingApisChanged(contributingApis);
+
+            if (this.initialLoad || contributingApisChanged) {
+              this.loadedGroupTypeApis = [...contributingApis].sort();
               this.loadGroups();
               if (this.initialLoad) {
                 this.initialLoad = false;
@@ -245,7 +269,7 @@ export class GroupsComponent implements OnInit, OnDestroy, AfterViewInit {
     this.totalFailure = false;
 
     const filter = this.searchService.generateNameFilter(this.currentSearchTerm);
-    this.registry.listGroups(this.groupType, pageRel, filter)
+    this.registry.listGroups(this.groupType, pageRel, filter, this.pageSize)
       .subscribe({
         next: (page) => {
           // Check API failure statistics
@@ -284,6 +308,13 @@ export class GroupsComponent implements OnInit, OnDestroy, AfterViewInit {
             this.groupsList = page.items;
             this.pageLinks = page.links;
             this.useClientSidePagination = false;
+            this.serverTotalCount = page.totalCount;
+
+            // Opportunistically warm the cache for the adjacent next page so
+            // clicking "next" feels instant. This shares RegistryService's
+            // request cache and only ever prefetches ONE page ahead - it
+            // never chains into fetching the rest of the registry.
+            this.registry.prefetchNextGroupsPage(this.groupType, page, filter, this.pageSize);
           }
 
           this.applyClientSideFilter();
@@ -412,6 +443,35 @@ export class GroupsComponent implements OnInit, OnDestroy, AfterViewInit {
 
     this.filteredGroupsList = filtered;
   }
+
+  /**
+   * Whether there is any RFC5988 (or composite multi-origin) pagination
+   * relation to show, for either server-driven or client-side pagination.
+   * `PageHeaderComponent` only renders controls whose specific relation is
+   * populated, so it is safe to always surface whatever links are present.
+   */
+  get hasPageLinks(): boolean {
+    return !!this.pageLinks && Object.values(this.pageLinks).some(link => !!link);
+  }
+
+  /**
+   * Compares the API endpoints currently known to contribute `this.groupType`
+   * against the set that was in effect the last time groups were loaded.
+   * Returns true only the first time (no previous set recorded) or when the
+   * set actually changed, so unrelated progressive model updates don't
+   * trigger redundant group collection requests.
+   */
+  private haveContributingApisChanged(contributingApis: string[]): boolean {
+    if (this.loadedGroupTypeApis === null) {
+      return true;
+    }
+    const sorted = [...contributingApis].sort();
+    if (sorted.length !== this.loadedGroupTypeApis.length) {
+      return true;
+    }
+    return sorted.some((api, i) => api !== this.loadedGroupTypeApis![i]);
+  }
+
   onPageChange(pageRel: string): void {
     this.loadGroups(pageRel);
   }
@@ -680,6 +740,10 @@ export class GroupsComponent implements OnInit, OnDestroy, AfterViewInit {
     this.groupsList = [];
     this.filteredGroupsList = [];
     this.allGroupsCache = [];
+    this.pageLinks = {};
+    this.useClientSidePagination = false;
+    this.serverTotalCount = undefined;
+    this.loadedGroupTypeApis = null;
     this.hasApiError = false;
     this.apiErrorMessage = '';
     this.apiErrorDetails = null;
