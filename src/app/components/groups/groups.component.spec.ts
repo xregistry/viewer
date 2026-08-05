@@ -10,6 +10,8 @@ import { ModelService } from '../../services/model.service';
 import { IconComponent } from '../icon/icon.component';
 import { SearchService } from '../../services/search.service';
 import { PLATFORM_ID, CUSTOM_ELEMENTS_SCHEMA } from '@angular/core';
+import { By } from '@angular/platform-browser';
+import { PageHeaderComponent } from '../page-header/page-header.component';
 
 describe('GroupsComponent', () => {
   let component: GroupsComponent;
@@ -55,6 +57,19 @@ describe('GroupsComponent', () => {
 
   it('should create', () => {
     expect(component).toBeTruthy();
+  });
+
+  it('shows pagination controls when the server returns a next link', () => {
+    component.useClientSidePagination = false;
+    component.pageLinks = {
+      next: 'https://registry.example.test/goregistries?offset=50&limit=50'
+    };
+
+    fixture.detectChanges();
+
+    const header = fixture.debugElement.query(By.directive(PageHeaderComponent))
+      .componentInstance as PageHeaderComponent;
+    expect(header.showPagination).toBe(true);
   });
 });
 
@@ -223,14 +238,25 @@ describe('GroupsComponent - server-driven group pagination', () => {
     expect(component.serverTotalCount).toBeUndefined();
   });
 
-  it('exposes hasPageLinks based on whatever RFC5988 relations are currently present', () => {
+  it('exposes showPagination based on whatever RFC5988 relations are currently present', () => {
     fixture.detectChanges();
 
     component.pageLinks = {};
-    expect(component.hasPageLinks).toBe(false);
+    expect(component.showPagination).toBe(false);
 
     component.pageLinks = { next: 'https://api-a.example.com/endpoints?offset=50' };
-    expect(component.hasPageLinks).toBe(true);
+    expect(component.showPagination).toBe(true);
+  });
+
+  it('exposes showPagination when using the client-side pagination fallback, even between navigations when pageLinks is momentarily empty', () => {
+    fixture.detectChanges();
+
+    component.pageLinks = {};
+    component.useClientSidePagination = false;
+    expect(component.showPagination).toBe(false);
+
+    component.useClientSidePagination = true;
+    expect(component.showPagination).toBe(true);
   });
 
   it('reloads groups with the generated filter when the search term changes, preserving search behavior', () => {

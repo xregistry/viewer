@@ -446,12 +446,17 @@ export class GroupsComponent implements OnInit, OnDestroy, AfterViewInit {
 
   /**
    * Whether there is any RFC5988 (or composite multi-origin) pagination
-   * relation to show, for either server-driven or client-side pagination.
-   * `PageHeaderComponent` only renders controls whose specific relation is
-   * populated, so it is safe to always surface whatever links are present.
+   * relation to show, for either server-driven pagination or the
+   * client-side pagination fallback (server returned an unbounded,
+   * unpaginated large dataset in one response - see
+   * `enableClientSidePagination`, which only ever populates the standard
+   * `first`/`prev`/`next`/`last` relations). `PageHeaderComponent` only
+   * renders controls whose specific relation is populated, so it is safe to
+   * surface whatever of those four relations are present.
    */
-  get hasPageLinks(): boolean {
-    return !!this.pageLinks && Object.values(this.pageLinks).some(link => !!link);
+  get showPagination(): boolean {
+    return this.useClientSidePagination ||
+      ['first', 'prev', 'next', 'last'].some(relation => Boolean(this.pageLinks[relation]));
   }
 
   /**
