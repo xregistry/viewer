@@ -1,8 +1,8 @@
 export interface RegistryModel {
-  specversion: string;
-  registryid: string;
-  name: string;
-  description: string;
+  specversion?: string;
+  registryid?: string;
+  name?: string;
+  description?: string;
   capabilities: {
     apis: string[];
     schemas: string[];
@@ -28,9 +28,9 @@ export interface CrossReference {
 }
 
 export interface GroupType {
-  plural: string;
-  singular: string;
-  description: string;
+  plural?: string;
+  singular?: string;
+  description?: string;
   resources: {
     [resourceType: string]: ResourceType;
   };
@@ -48,11 +48,11 @@ export interface GroupType {
 }
 
 export interface ResourceType {
-  plural: string;
-  singular: string;
-  description: string;
-  maxversions: number;
-  hasdocument: boolean;
+  plural?: string;
+  singular?: string;
+  description?: string;
+  maxversions?: number;
+  hasdocument?: boolean;
   attributes?: {
     [key: string]: {
       type: string;
