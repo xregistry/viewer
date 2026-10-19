@@ -172,6 +172,10 @@ export class RegistryService {
     return `${groupType}|${groupId}|${resourceType}${resourceId ? '|' + resourceId : ''}`;
   }
 
+  private buildPath(...segments: string[]): string {
+    return `/${segments.map(segment => encodeURIComponent(segment)).join('/')}`;
+  }
+
   /**
    * Constructs the API URL based on the resource path and whether we're using a proxy
    */
@@ -222,7 +226,7 @@ export class RegistryService {
     pageRel: string = '',
     filter?: string
   ): Observable<Page<ResourceDocument[]>> {
-    const pagePath = pageRel || `/${groupType}/${groupId}/${resourceType}`;
+    const pagePath = pageRel || this.buildPath(groupType, groupId, resourceType);
     return from(this.listResourcesAsync(groupType, groupId, resourceType, pagePath, filter));
   }
 
@@ -245,6 +249,7 @@ export class RegistryService {
     // Track 404 errors to distinguish between "resource not found" vs other failures
     let allEndpoints404 = true;
     let lastError: any = null;
+    let lastNon404Error: any = null;
 
     // Try each API endpoint until we find one that works
     for (const api of apis) {
@@ -379,6 +384,7 @@ export class RegistryService {
         // Check if this was a 404 error
         if (err && typeof err === 'object' && 'status' in err && err.status !== 404) {
           allEndpoints404 = false;
+          lastNon404Error = err;
         }
 
         continue;
@@ -396,9 +402,8 @@ export class RegistryService {
       };
     }
 
-    // If all APIs failed with other errors, return empty result but log the issue
-    this.debug.warn('All APIs failed to load resources, returning empty result');
-    return { items: [], links: {}, totalCount: 0 };
+    this.debug.error('All APIs failed to load resources');
+    throw lastNon404Error ?? lastError ?? new Error('All registry endpoints failed to load resources');
   }
 
   getGroup(groupType: string, groupId: string): Observable<Group> {
@@ -427,7 +432,7 @@ export class RegistryService {
     // Try each API until we find one that works
     for (const api of apisToTry) {
       try {
-        const url = this.getApiUrl(api, `/${groupType}/${groupId}`);
+        const url = this.getApiUrl(api, this.buildPath(groupType, groupId));
         const group = await lastValueFrom(
           this.httpGetWithRetry<Group>(url).pipe(
             map(response => response.body as Group)
@@ -642,7 +647,8 @@ export class RegistryService {
     pageRel: string = '',
     filter?: string
   ): Observable<Page<ResourceDocument[]>> {
-    const pagePath = pageRel || `/${groupType}/${groupId}/${resourceType}/${resourceId}/versions`;
+    const pagePath = pageRel ||
+      `${this.buildPath(groupType, groupId, resourceType, resourceId)}/versions`;
     return from(
       this.listResourceVersionsAsync(
         groupType,
@@ -667,6 +673,9 @@ export class RegistryService {
     if (apis.length === 0) {
       return { items: [], links: {} };
     }
+
+    let lastError: any = null;
+    let lastNon404Error: any = null;
 
     // Try each API endpoint until we find one that works
     for (const api of apis) {
@@ -737,12 +746,15 @@ export class RegistryService {
         return { items, links };
       } catch (err) {
         this.debug.error(`Failed to list resource versions from ${api}:`, err);
+        lastError = err;
+        if (err && typeof err === 'object' && 'status' in err && err.status !== 404) {
+          lastNon404Error = err;
+        }
         continue;
       }
     }
 
-    // If all APIs failed, return empty result
-    return { items: [], links: {} };
+    throw lastNon404Error ?? lastError ?? new Error('All registry endpoints failed to load version history');
   }
 
   fetchDocument(url: string): Observable<string> {
@@ -820,9 +832,9 @@ export class RegistryService {
     };
 
     // Include version-related information
-    if (entry.versionscount) resource.versionscount = entry.versionscount;
-    if (entry.versionsurl) resource.versionsurl = entry.versionsurl;
-    if (entry.meta?.defaultversionid) resource.defaultversionid = entry.meta.defaultversionid;
+    if (entry.versionscount != null) resource.versionscount = entry.versionscount;
+    if (entry.versionsurl != null) resource.versionsurl = entry.versionsurl;
+    if (entry.meta?.defaultversionid != null) resource.defaultversionid = entry.meta.defaultversionid;
 
     // Include counts and URLs
     Object.keys(entry).forEach(key => {
@@ -834,7 +846,7 @@ export class RegistryService {
     // Include metadata attributes
     if (entry.meta) {
       Object.keys(entry.meta).forEach(key => {
-        if (!resource[key]) {
+        if (resource[key] === undefined) {
           resource[key] = entry.meta[key];
         }
       });
@@ -857,7 +869,7 @@ export class RegistryService {
           'modifiedat',
           'meta',
         ].includes(key) &&
-        !resource[key]
+        resource[key] === undefined
       ) {
         resource[key] = entry[key];
       }
@@ -1141,14 +1153,15 @@ export class RegistryService {
     // Track 404 errors to distinguish between "not found" vs other failures
     let allEndpoints404 = true;
     let lastError: any = null;
+    let lastNon404Error: any = null;
 
     // Try each API endpoint until we get a successful response
     for (const api of apisToTry) {
       try {
         // Construct base path depending on whether this is for a version or resource
-        let basePath = `/${groupType}/${groupId}/${resourceType}/${resourceId}`;
+        let basePath = this.buildPath(groupType, groupId, resourceType, resourceId);
         if (versionId) {
-          basePath += `/versions/${versionId}`;
+          basePath += `/versions/${encodeURIComponent(versionId)}`;
         }
 
         // Construct URLs for regular and $details endpoints
@@ -1210,6 +1223,7 @@ export class RegistryService {
               lastError = regularError;
               if (regularError && typeof regularError === 'object' && 'status' in regularError && regularError.status !== 404) {
                 allEndpoints404 = false;
+                lastNon404Error = regularError;
               }
               throw regularError;
             }
@@ -1219,6 +1233,7 @@ export class RegistryService {
           lastError = error;
           if (error && typeof error === 'object' && 'status' in error && error.status !== 404) {
             allEndpoints404 = false;
+            lastNon404Error = error;
           }
           throw error;
         }
@@ -1229,6 +1244,7 @@ export class RegistryService {
         // Check if this was a 404 error
         if (err && typeof err === 'object' && 'status' in err && err.status !== 404) {
           allEndpoints404 = false;
+          lastNon404Error = err;
         }
 
         continue;
@@ -1251,9 +1267,8 @@ export class RegistryService {
       };
     }
 
-    // If all APIs failed with other errors, return null (maintains existing behavior)
-    this.debug.warn('All APIs failed to load resource details, returning null');
-    return null as any;
+    this.debug.error('All APIs failed to load resource details');
+    throw lastNon404Error ?? lastError ?? new Error('All registry endpoints failed to load resource details');
   }
 
   /**
@@ -1303,7 +1318,7 @@ export class RegistryService {
    * @param filter optional filter string to apply to the query
    */
   listGroups(groupType: string, pageRel: string = '', filter?: string): Observable<Page<Group[]>> {
-    const pagePath = pageRel || `/${groupType}`;
+    const pagePath = pageRel || this.buildPath(groupType);
     return from(this.listGroupsAsync(groupType, pagePath, filter));
   }
 
@@ -1334,16 +1349,7 @@ export class RegistryService {
         const linkHeader = response.headers.get('Link') || '';
         this.debug.log(`Link header received for groups: ${linkHeader}`);
 
-        const links: any = {};
-        linkHeader.split(',').forEach(part => {
-          const match = part.trim().match(/<([^>]+)>;\s*rel="?([a-zA-Z0-9_-]+)"?/i);
-          if (match) {
-            links[match[2]] = match[1];
-            this.debug.log(`Found link relation: ${match[2]} -> ${match[1]}`);
-          } else {
-            this.debug.warn(`Failed to parse link header part: ${part}`);
-          }
-        });
+        const links = this.parseGroupLinkHeader(linkHeader);
 
         // Map entries to Group[]
         const meta = model.groups[groupType] || { singular: groupType, attributes: {} };
@@ -1378,6 +1384,7 @@ export class RegistryService {
           this.httpGetWithRetry<{ [id: string]: any }>(url)
         );
         const data = response.body || {};
+        const links = this.parseGroupLinkHeader(response.headers.get('Link') || '');
 
         // Map entries to Group[] with origin tracking
         const meta = model.groups[groupType] || { singular: groupType, attributes: {} };
@@ -1394,10 +1401,10 @@ export class RegistryService {
         });
 
         this.debug.log(`Successfully loaded ${groups.length} groups from ${api}`);
-        return { api, groups, success: true, error: null };
+        return { api, groups, links, success: true, error: null };
       } catch (err) {
         this.debug.error(`Failed to list groups from ${api}:`, err);
-        return { api, groups: [], success: false, error: err };
+        return { api, groups: [], links: {}, success: false, error: err };
       }
     });
 
@@ -1431,10 +1438,9 @@ export class RegistryService {
       this.debug.log(`Failed APIs (${failedApis.length}): ${failedApis.join(', ')}`);
     }
 
-    // For pagination links, we'll use the first successful API's pattern
-    // In a multi-API scenario, pagination becomes complex as each API has its own pagination
-    // For now, we disable pagination when merging multiple APIs
-    const links: any = {};
+    // A single API has one unambiguous pagination cursor. Multiple APIs have
+    // independent cursors, so merged pagination remains disabled.
+    const links = apis.length === 1 && results[0]?.success ? results[0].links : {};
 
     const result: Page<Group[]> = {
       items: allGroups,
@@ -1451,6 +1457,22 @@ export class RegistryService {
     }
 
     return result;
+  }
+
+  private parseGroupLinkHeader(linkHeader: string): { [key: string]: string } {
+    const links: { [key: string]: string } = {};
+    if (!linkHeader) return links;
+
+    linkHeader.split(',').forEach(part => {
+      const match = part.trim().match(/<([^>]+)>;\s*rel="?([a-zA-Z0-9_-]+)"?/i);
+      if (match) {
+        links[match[2]] = match[1];
+        this.debug.log(`Found link relation: ${match[2]} -> ${match[1]}`);
+      } else {
+        this.debug.warn(`Failed to parse link header part: ${part}`);
+      }
+    });
+    return links;
   }
 
 }

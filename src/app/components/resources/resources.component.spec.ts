@@ -9,6 +9,8 @@ import { ConfigService } from '../../services/config.service';
 import { ModelService } from '../../services/model.service';
 import { IconComponent } from '../icon/icon.component';
 import { PLATFORM_ID, CUSTOM_ELEMENTS_SCHEMA } from '@angular/core';
+import { By } from '@angular/platform-browser';
+import { ResourceRowComponent } from '../resource-row/resource-row.component';
 
 describe('ResourcesComponent', () => {
   let component: ResourcesComponent;
@@ -52,5 +54,23 @@ describe('ResourcesComponent', () => {
 
   it('should create', () => {
     expect(component).toBeTruthy();
+  });
+
+  it('passes route context to list rows with slash-containing resource IDs', () => {
+    component.loading = false;
+    component.hasError = false;
+    component.viewMode = 'list';
+    component.groupType = 'endpoints';
+    component.groupId = 'test-group';
+    component.resourceType = 'modules';
+    component.filteredResourcesList = [{ id: 'github.com/example/module', name: 'github.com/example/module' }];
+
+    fixture.detectChanges();
+
+    const row = fixture.debugElement.query(By.directive(ResourceRowComponent))
+      .componentInstance as ResourceRowComponent;
+    expect(row.groupType).toBe('endpoints');
+    expect(row.groupId).toBe('test-group');
+    expect(row.resourceRoute().toString()).toBe('/endpoints/test-group/modules/github.com%2Fexample%2Fmodule');
   });
 });

@@ -106,37 +106,17 @@ export class AppComponent implements OnInit {
    * Made public to allow template to trigger reloads
    */
   loadConfiguration(): void {
-    // Check multiple possible locations for config.json
-    const configLocations = ['/config.json', './config.json', 'config.json', '/assets/config.json'];
-
-    // Log the base href - this can affect where files are loaded from
     const baseElement = document.querySelector('base');
     const baseHref = baseElement ? baseElement.getAttribute('href') : '/';
     this.debug.log(`AppComponent: Current base href is: ${baseHref}`);
 
-    // First try to verify the config file exists at primary location
-    const checkConfigUrl = '/config.json';
+    const configPath = new URL('config.json', document.baseURI).toString();
 
-    this.debug.log(`AppComponent: Checking for config at ${checkConfigUrl}`);
-    fetch(checkConfigUrl, {
-      method: 'HEAD',
-      // Add cache-busting to prevent cached responses
-      headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' }
-    })
-      .then(response => {
-        if (response.ok) {
-          this.debug.log(`AppComponent: Config file verified at ${checkConfigUrl}`);
-          return this.loadConfigFile(checkConfigUrl);
-        } else {
-          this.debug.warn(`AppComponent: Config file not found at primary location ${checkConfigUrl}, status: ${response.status}`);
-          throw new Error(`Config file not accessible at primary location: ${response.status}`);
-        }
-      })
-      .catch(err => {
-        this.debug.warn('AppComponent: Error checking primary config file:', err);
-        // Try all config locations in sequence until one works
-        this.tryConfigLocations(configLocations, 0);
-      });
+    this.loadConfigFile(configPath).catch(err => {
+      this.debug.error(`AppComponent: Failed to load configuration from ${configPath}:`, err);
+      this.configError = `Failed to load application configuration from ${configPath}`;
+      this.configLoaded = true;
+    });
   }
 
   /**

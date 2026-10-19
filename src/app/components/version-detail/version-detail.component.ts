@@ -1,6 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { Component, OnInit, CUSTOM_ELEMENTS_SCHEMA, OnDestroy } from '@angular/core';
-import { ActivatedRoute } from '@angular/router';
+import { ActivatedRoute, Router } from '@angular/router';
 import { Observable, Subject } from 'rxjs';
 import { switchMap, map, tap, catchError, takeUntil } from 'rxjs/operators';
 import { RegistryService } from '../../services/registry.service';
@@ -15,6 +15,7 @@ import { EmptyStateComponent } from '../empty-state/empty-state.component';
 import { ErrorBoundaryComponent } from '../error-boundary/error-boundary.component';
 import { DeprecationIndicatorComponent } from '../deprecation-indicator/deprecation-indicator.component';
 import { CrossReferenceComponent } from '../cross-reference/cross-reference.component';
+import { getPrimaryRouteSegment } from '../../utils/route.utils';
 
 @Component({
   standalone: true,
@@ -59,6 +60,7 @@ export class VersionDetailComponent implements OnInit, OnDestroy {
 
   constructor(
     private route: ActivatedRoute,
+    private router: Router,
     private registry: RegistryService,
     private modelService: ModelService,
     private debug: DebugService
@@ -69,8 +71,9 @@ export class VersionDetailComponent implements OnInit, OnDestroy {
       this.groupType = params.get('groupType')!;
       this.groupId = params.get('groupId')!;
       this.resourceType = params.get('resourceType')!;
-      this.resourceId = params.get('resourceId')!;
-      this.versionId = params.get('versionId')!;
+      const routeTree = this.router.parseUrl(this.router.url);
+      this.resourceId = getPrimaryRouteSegment(routeTree, 3, params.get('resourceId') ?? '');
+      this.versionId = getPrimaryRouteSegment(routeTree, 5, params.get('versionId') ?? '');
 
       this.debug.log(`Version Detail Component initialized with:`, {
         groupType: this.groupType,
