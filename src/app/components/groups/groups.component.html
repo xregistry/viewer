@@ -3,9 +3,10 @@
   [showViewToggle]="true"
   [currentViewMode]="viewMode"
   [showPagination]="showPagination"
+
   [pageLinks]="pageLinks"
   [resultsCount]="filteredGroupsList.length || 0"
-  [totalCount]="useClientSidePagination ? allGroupsCache.length || 0 : 0"
+  [totalCount]="useClientSidePagination ? (allGroupsCache.length || 0) : (serverTotalCount || 0)"
   [resultsText]="'groups'"
   [searchResultsText]="currentSearchTerm ? 'Showing ' + (filteredGroupsList.length || 0) + ' groups (filtered from ' + (groupsList.length || 0) + ')' : ''"
   (viewModeChange)="setViewMode($event)"

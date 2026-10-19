@@ -42,6 +42,7 @@ export interface Page<T> {
   };
   totalCount?: number;
   currentPage?: number;
+  totalPages?: number;
   pageSize?: number;
   // Error handling fields for multi-API scenarios
   totalApis?: number;
@@ -62,6 +63,16 @@ export class RegistryService {
 
   // Cache for document resources to avoid repeated fetches
   private resourceCache = new LRUCache<string, ResourceDocument>(100);
+
+  // Default bounded page size for group listing requests (used unless a
+  // caller explicitly requests a different, still-bounded size).
+  private readonly defaultGroupPageSize = 50;
+
+  // Request-sharing cache for group listing pages: dedupes identical
+  // in-flight/completed requests (including adjacent-next-page prefetch) so
+  // pagination and prefetch never issue duplicate network calls, and so
+  // clicking "next" after a prefetch reuses the already-fetched page.
+  private groupsPageCache = new LRUCache<string, Promise<Page<Group[]>>>(50);
 
   // Default retry configuration
   private defaultRetryConfig: RetryConfig = {
@@ -100,6 +111,7 @@ export class RegistryService {
     console.log('RegistryService: Clearing endpoint and resource caches');
     this.endpointCache.clear();
     this.resourceCache.clear();
+    this.groupsPageCache.clear();
   }
 
   /**
@@ -1312,120 +1324,400 @@ export class RegistryService {
   }
 
   /**
-   * List groups using RFC5988 relation-based navigation (first, prev, next, last).
-   * @param groupType the type of group to list
-   * @param pageRel URL or relation name (e.g. '', 'first', 'next', full path)
-   * @param filter optional filter string to apply to the query
+   * Parse an RFC5988 Link header into a relation -> absolute URL map.
+   * Shared by both single-origin and per-origin (multi-API) group listing so a
+   * single API's real Link relations are always retained and used as-is.
    */
-  listGroups(groupType: string, pageRel: string = '', filter?: string): Observable<Page<Group[]>> {
+  private parseGroupLinkHeader(linkHeader: string): { [rel: string]: string } {
+    const links: { [rel: string]: string } = {};
+    if (!linkHeader) {
+      return links;
+    }
+    linkHeader.split(',').forEach(part => {
+      const trimmed = part.trim();
+      if (!trimmed) {
+        return;
+      }
+      const match = trimmed.match(/<([^>]+)>;\s*rel="?([a-zA-Z0-9_-]+)"?/i);
+      if (match) {
+        links[match[2]] = match[1];
+        this.debug.log(`Found link relation: ${match[2]} -> ${match[1]}`);
+      } else {
+        this.debug.warn(`Failed to parse link header part: ${trimmed}`);
+      }
+    });
+    return links;
+  }
+
+  /**
+   * Parse the `X-Total-Count` response header - now exposed cross-origin via
+   * `Access-Control-Expose-Headers` - into a total-item count for a group
+   * listing response. This is only ever read from a SINGLE contributing
+   * origin's own response (the initial single-origin request, or an
+   * absolute-URL pagination continuation for a single origin); a merged
+   * multi-origin listing has no single coherent total and intentionally
+   * leaves `totalCount` undefined rather than guessing (e.g. by summing
+   * origins), since that was not requested and could silently mislead users
+   * about how paging maps onto a genuinely merged, multi-origin collection.
+   */
+  private parseGroupTotalCount(response: HttpResponse<any>): number | undefined {
+    const raw = response.headers.get('X-Total-Count');
+    if (!raw) {
+      return undefined;
+    }
+    const parsed = parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  /**
+   * Derive `currentPage` / `totalPages` for a single-origin group listing
+   * page from its bounded page size, its (optional) total item count, and
+   * the RFC5988 Link relations returned alongside it. Mirrors the existing,
+   * already-proven derivation used for resource listings so behavior stays
+   * consistent across the app wherever these optional `Page<T>` fields are
+   * available to a consumer.
+   */
+  private deriveGroupPageMeta(
+    pageSize: number,
+    totalCount: number | undefined,
+    links: { [rel: string]: string }
+  ): { currentPage?: number; totalPages?: number } {
+    let currentPage: number | undefined;
+    if (links['next']) {
+      try {
+        const nextOffset = parseInt(new URL(links['next']).searchParams.get('offset') || '0', 10);
+        currentPage = Math.floor(nextOffset / pageSize);
+      } catch {
+        // Malformed/relative next URL - leave currentPage undetermined rather than guessing.
+      }
+    } else if (links['prev']) {
+      try {
+        const prevOffset = parseInt(new URL(links['prev']).searchParams.get('offset') || '0', 10);
+        currentPage = Math.floor(prevOffset / pageSize) + 2;
+      } catch {
+        // Malformed/relative prev URL - leave currentPage undetermined rather than guessing.
+      }
+    } else {
+      currentPage = 1;
+    }
+
+    let totalPages: number | undefined;
+    if (totalCount !== undefined && pageSize > 0) {
+      totalPages = Math.ceil(totalCount / pageSize);
+    } else if (links['last']) {
+      try {
+        const lastOffset = parseInt(new URL(links['last']).searchParams.get('offset') || '0', 10);
+        totalPages = Math.floor(lastOffset / pageSize) + 1;
+      } catch {
+        // Malformed/relative last URL - leave totalPages undetermined rather than guessing.
+      }
+    }
+
+    return { currentPage, totalPages };
+  }
+
+  /** Prefix identifying an opaque, bounded multi-origin pagination cursor. */
+  private static readonly MULTI_ORIGIN_CURSOR_PREFIX = 'multi:';
+
+  /**
+   * Encode a set of per-origin absolute Link URLs (e.g. every origin's own
+   * "next" relation) PLUS a `previous` breadcrumb into a single opaque cursor
+   * string. This lets a merged, multi-API group listing represent paging
+   * coherently through the exact same `Page<T>.links` shape used for a
+   * single API, instead of silently discarding pagination once more than one
+   * origin contributes.
+   *
+   * The `previous` breadcrumb is the cursor (or the initial `/<groupType>`
+   * path) that was used to fetch the CURRENT page. It is carried FORWARD
+   * into every subsequently-issued `next` cursor. This is required because
+   * once an origin is exhausted (has no more `next` relation of its own) it
+   * is correctly dropped from `origins` on later pages - so there is no
+   * general way to reconstruct a prior merged page's per-origin URLs from a
+   * later page's per-origin URLs alone. Storing the exact previous cursor
+   * instead lets `links.prev` simply replay that earlier, already-known
+   * request deterministically, rather than trying (and failing) to recompose
+   * it from currently-active origins only.
+   */
+  private encodeMultiOriginCursor(origins: { [api: string]: string }, previous: string): string | undefined {
+    const entries = Object.entries(origins).filter(([, url]) => !!url);
+    if (entries.length === 0) {
+      return undefined;
+    }
+    const payload = JSON.stringify({ origins: Object.fromEntries(entries), previous });
+    return `${RegistryService.MULTI_ORIGIN_CURSOR_PREFIX}${encodeURIComponent(payload)}`;
+  }
+
+  private decodeMultiOriginCursor(cursor: string): { origins: { [api: string]: string }; previous: string } {
+    const encoded = cursor.slice(RegistryService.MULTI_ORIGIN_CURSOR_PREFIX.length);
+    try {
+      const decoded = JSON.parse(decodeURIComponent(encoded));
+      if (decoded && typeof decoded === 'object' && decoded.origins && typeof decoded.origins === 'object') {
+        return {
+          origins: decoded.origins,
+          previous: typeof decoded.previous === 'string' ? decoded.previous : ''
+        };
+      }
+      return { origins: {}, previous: '' };
+    } catch (err) {
+      this.debug.error(`Failed to decode multi-origin pagination cursor: ${cursor}`, err);
+      return { origins: {}, previous: '' };
+    }
+  }
+
+  private isMultiOriginCursor(pagePath: string): boolean {
+    return pagePath.startsWith(RegistryService.MULTI_ORIGIN_CURSOR_PREFIX);
+  }
+
+  /**
+   * Ensure a URL carries an explicit, bounded page size (`limit`) so an
+   * initial group listing request can never turn into an unbounded fetch.
+   * Absolute pagination URLs taken straight from a server's own Link header
+   * already encode the server-chosen limit/offset and are left untouched.
+   */
+  private withBoundedLimit(url: string, pageSize: number): string {
+    try {
+      const urlObj = new URL(url);
+      if (!urlObj.searchParams.has('limit')) {
+        urlObj.searchParams.set('limit', String(pageSize));
+      }
+      return urlObj.toString();
+    } catch {
+      if (/[?&]limit=/.test(url)) {
+        return url;
+      }
+      const separator = url.includes('?') ? '&' : '?';
+      return `${url}${separator}limit=${pageSize}`;
+    }
+  }
+
+  /**
+   * List groups using RFC5988 relation-based navigation (first, prev, next, last).
+   *
+   * - Single-origin group types: the contributing API's real Link header
+   *   relations are retained and returned as-is (absolute URLs), per RFC5988.
+   * - Multi-origin (merged) group types: each origin keeps advancing through
+   *   its OWN real Link header; the per-origin URLs are combined into a
+   *   single opaque cursor value carried in `links.next` / `links.prev` so
+   *   callers keep using the exact same relation-based API. Pagination is
+   *   therefore represented coherently instead of silently discarded, while
+   *   staying bounded and deterministic (one bounded page per origin per
+   *   navigation - never a recursive/unbounded fetch of the whole registry).
+   *
+   * Every request - including the very first one - is bounded with an
+   * explicit `limit` query parameter (`pageSize`, default 50) so a group
+   * listing can never trigger an unbounded fetch.
+   *
+   * Identical requests (same groupType/pagePath/filter/pageSize) share a
+   * single in-flight/completed result via an internal cache, so adjacent-page
+   * prefetching (see `prefetchNextGroupsPage`) never causes duplicate network
+   * calls.
+   *
+   * @param groupType the type of group to list
+   * @param pageRel URL, opaque multi-origin cursor, or empty string for the first page
+   * @param filter optional filter string to apply to the query
+   * @param pageSize bounded page size to request (default 50)
+   */
+  listGroups(
+    groupType: string,
+    pageRel: string = '',
+    filter?: string,
+    pageSize: number = this.defaultGroupPageSize
+  ): Observable<Page<Group[]>> {
     const pagePath = pageRel || this.buildPath(groupType);
-    return from(this.listGroupsAsync(groupType, pagePath, filter));
+    // The cache key MUST include the current set of contributing API
+    // endpoints. Progressive model loading can discover a new origin for
+    // this group type after an earlier (e.g. single-origin) page was already
+    // cached; without this, a later call would replay that stale, now-
+    // incomplete cached page instead of re-querying with the full, current
+    // origin set.
+    const contributingApis = this.modelService.getApiEndpointsForGroupType(groupType);
+    const cacheKey = this.groupsPageCacheKey(groupType, pagePath, filter, pageSize, contributingApis);
+
+    let pending = this.groupsPageCache.get(cacheKey);
+    if (!pending) {
+      pending = this.listGroupsAsync(groupType, pagePath, filter, pageSize).then(page => {
+        // Do not keep a resolved failure/partial-failure page cached.
+        // listGroupsAsync catches per-API errors internally and RESOLVES
+        // (rather than rejects) with a Page describing the failure, so a
+        // plain `.catch()` below is not enough to guard against this: a
+        // retry, or recovery of a previously-failing/transient origin, must
+        // hit the network again instead of forever replaying the same
+        // cached failure.
+        if ((page.failedApis ?? 0) > 0 || page.successfulApis === 0) {
+          this.groupsPageCache.delete(cacheKey);
+        }
+        return page;
+      });
+      this.groupsPageCache.set(cacheKey, pending);
+      // Defensive: also evict on a genuine promise rejection, in case
+      // listGroupsAsync's internal error handling ever changes.
+      pending.catch(() => this.groupsPageCache.delete(cacheKey));
+    }
+    return from(pending);
+  }
+
+  /**
+   * Prefetch the single adjacent next page for a group listing, sharing the
+   * same request-cache used by `listGroups` so a subsequent real navigation
+   * reuses the already-fetched result instead of issuing a duplicate
+   * request. This intentionally prefetches only ONE page ahead and never
+   * chains further prefetch calls from within itself, so it can never
+   * cascade into downloading the entire registry.
+   */
+  prefetchNextGroupsPage(
+    groupType: string,
+    page: Page<Group[]> | null | undefined,
+    filter?: string,
+    pageSize: number = this.defaultGroupPageSize
+  ): void {
+    const nextRel = page?.links?.next;
+    if (!nextRel) {
+      return;
+    }
+    // Must use the SAME API-aware cache key as listGroups() (see there for
+    // why the contributing API set is part of the key), otherwise this
+    // "already cached?" check could look up the wrong entry entirely.
+    const contributingApis = this.modelService.getApiEndpointsForGroupType(groupType);
+    const cacheKey = this.groupsPageCacheKey(groupType, nextRel, filter, pageSize, contributingApis);
+    if (this.groupsPageCache.has(cacheKey)) {
+      return; // Already fetched, in flight, or previously prefetched.
+    }
+    this.debug.log(`Prefetching adjacent next groups page for '${groupType}'`);
+    // Fire-and-forget: only populates the shared cache. No recursive prefetch.
+    this.listGroups(groupType, nextRel, filter, pageSize).subscribe({
+      error: (err) => this.debug.warn(`Prefetch of next groups page failed for '${groupType}':`, err)
+    });
+  }
+
+  private groupsPageCacheKey(
+    groupType: string,
+    pagePath: string,
+    filter: string | undefined,
+    pageSize: number,
+    contributingApis: string[]
+  ): string {
+    // Sorted so the key is stable regardless of the (irrelevant) order
+    // getApiEndpointsForGroupType happens to return endpoints in.
+    const apiSetKey = [...contributingApis].sort().join(',');
+    return `${groupType}::${pagePath}::${filter || ''}::${pageSize}::${apiSetKey}`;
   }
 
   /**
    * Async implementation of listGroups with relation-based URL
    */
-  private async listGroupsAsync(groupType: string, pagePath: string, filter?: string): Promise<Page<Group[]>> {
+  private async listGroupsAsync(
+    groupType: string,
+    pagePath: string,
+    filter: string | undefined,
+    pageSize: number
+  ): Promise<Page<Group[]>> {
     const model = await lastValueFrom(this.modelService.getRegistryModel());
     const apis = this.modelService.getApiEndpointsForGroupType(groupType);
     if (apis.length === 0) {
-      return { items: [], links: {}, totalApis: 0, successfulApis: 0, failedApis: 0 };
+      return { items: [], links: {}, totalApis: 0, successfulApis: 0, failedApis: 0, pageSize };
     }
 
-    // For absolute URLs (pagination), use the original single-API logic
+    const meta = model.groups[groupType] || { singular: groupType, attributes: {} };
+    const mapEntry = (key: string, entry: any, origin: string): Group => {
+      const idKey = meta.singular + 'id';
+      return {
+        id: entry[idKey] || entry.id || key,
+        name: entry.name,
+        createdAt: entry.createdat,
+        modifiedAt: entry.modifiedat,
+        origin,
+        ...entry
+      } as Group;
+    };
+
+    // Page 2+ of a merged, multi-origin listing: resume each origin from its
+    // own previously-captured Link relation.
+    if (this.isMultiOriginCursor(pagePath)) {
+      return this.listGroupsFromMultiOriginCursor(groupType, pagePath, filter, pageSize, mapEntry, apis);
+    }
+
+    // Absolute URL: continuing pagination for a SINGLE contributing origin.
+    // Retain and use its real RFC5988 Link header as-is.
     if (pagePath.startsWith('http')) {
-      // Extract the API base from the absolute URL to determine which API to use
       const targetApi = apis.find(api => pagePath.startsWith(api)) || apis[0];
       try {
-        // For absolute URLs (pagination links), add filter directly
         const url = this.addFilterToUrl(pagePath, filter);
-
         const response = await lastValueFrom(
           this.http.get<{ [id: string]: any }>(url, { observe: 'response' as const })
         );
         const data = response.body || {};
-
-        // Parse RFC5988 Link header
         const linkHeader = response.headers.get('Link') || '';
         this.debug.log(`Link header received for groups: ${linkHeader}`);
-
         const links = this.parseGroupLinkHeader(linkHeader);
-
-        // Map entries to Group[]
-        const meta = model.groups[groupType] || { singular: groupType, attributes: {} };
-        const groups: Group[] = Object.entries(data).map(([key, entry]: [string, any]) => {
-          const idKey = meta.singular + 'id';
-          return {
-            id: entry[idKey] || entry.id || key,
-            name: entry.name,
-            createdAt: entry.createdat,
-            modifiedAt: entry.modifiedat,
-            origin: targetApi,
-            ...entry
-          } as Group;
-        });
-        return { items: groups, links, totalApis: 1, successfulApis: 1, failedApis: 0 };
+        const totalCount = this.parseGroupTotalCount(response);
+        const { currentPage, totalPages } = this.deriveGroupPageMeta(pageSize, totalCount, links);
+        const groups: Group[] = Object.entries(data).map(([key, entry]) => mapEntry(key, entry, targetApi));
+        return { items: groups, links, totalApis: 1, successfulApis: 1, failedApis: 0, pageSize, totalCount, currentPage, totalPages };
       } catch (err) {
         this.debug.error(`Failed to list groups from absolute URL ${pagePath}:`, err);
-        return { items: [], links: {}, totalApis: 1, successfulApis: 0, failedApis: 1, error: err };
+        return { items: [], links: {}, totalApis: 1, successfulApis: 0, failedApis: 1, error: err, pageSize };
       }
     }
 
-    // For relative URLs (initial load), query ALL APIs in parallel and merge results
-    this.debug.log(`Querying ${apis.length} APIs for group type '${groupType}': ${apis.join(', ')}`);
+    // Initial (bounded) load: query all contributing origins in parallel,
+    // applying an explicit `limit` on every request so this can never turn
+    // into an unbounded fetch.
+    return this.listGroupsFromAllOrigins(groupType, pagePath, filter, pageSize, mapEntry, apis);
+  }
+
+  /**
+   * Query every contributing origin for the first bounded page of a group
+   * type and merge the results. When a single origin contributes, its real
+   * RFC5988 Link header is passed through untouched. When multiple origins
+   * contribute, their individual `next` (and `prev`, once available) Link
+   * relations are combined into a single opaque, bounded, deterministic
+   * cursor rather than being silently dropped.
+   */
+  private async listGroupsFromAllOrigins(
+    groupType: string,
+    pagePath: string,
+    filter: string | undefined,
+    pageSize: number,
+    mapEntry: (key: string, entry: any, origin: string) => Group,
+    apis: string[]
+  ): Promise<Page<Group[]>> {
+    this.debug.log(`Querying ${apis.length} API(s) for group type '${groupType}': ${apis.join(', ')}`);
 
     const apiRequests = apis.map(async (api) => {
       try {
-        // For relative URLs, use getApiUrl which handles filter internally
-        const url = this.getApiUrl(api, pagePath, filter);
+        const url = this.withBoundedLimit(this.getApiUrl(api, pagePath, filter), pageSize);
         this.debug.log(`Requesting groups from: ${url}`);
-
-        const response = await lastValueFrom(
-          this.httpGetWithRetry<{ [id: string]: any }>(url)
-        );
+        const response = await lastValueFrom(this.httpGetWithRetry<{ [id: string]: any }>(url));
         const data = response.body || {};
         const links = this.parseGroupLinkHeader(response.headers.get('Link') || '');
-
-        // Map entries to Group[] with origin tracking
-        const meta = model.groups[groupType] || { singular: groupType, attributes: {} };
-        const groups: Group[] = Object.entries(data).map(([key, entry]: [string, any]) => {
-          const idKey = meta.singular + 'id';
-          return {
-            id: entry[idKey] || entry.id || key,
-            name: entry.name,
-            createdAt: entry.createdat,
-            modifiedAt: entry.modifiedat,
-            origin: api,
-            ...entry
-          } as Group;
-        });
-
+        const totalCount = this.parseGroupTotalCount(response);
+        const groups = Object.entries(data).map(([key, entry]) => mapEntry(key, entry, api));
         this.debug.log(`Successfully loaded ${groups.length} groups from ${api}`);
-        return { api, groups, links, success: true, error: null };
+        return { api, groups, links, totalCount, success: true, error: null as any };
       } catch (err) {
         this.debug.error(`Failed to list groups from ${api}:`, err);
-        return { api, groups: [], links: {}, success: false, error: err };
+        return { api, groups: [] as Group[], links: {} as { [rel: string]: string }, totalCount: undefined as number | undefined, success: false, error: err };
       }
     });
 
-    // Wait for all API requests to complete
     const results = await Promise.all(apiRequests);
 
-    // Merge all successful results and track failure statistics
     const allGroups: Group[] = [];
     const successfulApis: string[] = [];
     const failedApis: string[] = [];
     const errors: any[] = [];
+    const nextByOrigin: { [api: string]: string } = {};
 
     results.forEach(result => {
       if (result.success) {
-        // Endpoint responded successfully, even if it returned 0 groups
         successfulApis.push(result.api);
         if (result.groups.length > 0) {
           allGroups.push(...result.groups);
         }
+        if (result.links['next']) {
+          nextByOrigin[result.api] = result.links['next'];
+        }
       } else {
-        // Endpoint failed to respond (network error, 404, 500, etc.)
         failedApis.push(result.api);
         if (result.error) {
           errors.push({ api: result.api, error: result.error });
@@ -1433,24 +1725,51 @@ export class RegistryService {
       }
     });
 
-    this.debug.log(`Merged ${allGroups.length} total groups from ${successfulApis.length} successful APIs: ${successfulApis.join(', ')}`);
+    this.debug.log(`Merged ${allGroups.length} total groups from ${successfulApis.length} successful API(s): ${successfulApis.join(', ')}`);
     if (failedApis.length > 0) {
       this.debug.log(`Failed APIs (${failedApis.length}): ${failedApis.join(', ')}`);
     }
 
-    // A single API has one unambiguous pagination cursor. Multiple APIs have
-    // independent cursors, so merged pagination remains disabled.
-    const links = apis.length === 1 && results[0]?.success ? results[0].links : {};
+    const links: { [rel: string]: string } = {};
+    // Only ever populated for a single contributing origin - see
+    // parseGroupTotalCount() for why a merged multi-origin listing
+    // intentionally leaves these undefined instead of guessing.
+    let totalCount: number | undefined;
+    let currentPage: number | undefined;
+    let totalPages: number | undefined;
+
+    if (successfulApis.length === 1) {
+      // Exactly one contributing origin: pass its real RFC5988 relations through untouched.
+      const only = results.find(r => r.success);
+      if (only?.links) {
+        Object.assign(links, only.links);
+      }
+      totalCount = only?.totalCount;
+      ({ currentPage, totalPages } = this.deriveGroupPageMeta(pageSize, totalCount, links));
+    } else if (Object.keys(nextByOrigin).length > 0) {
+      // Multiple contributing origins: represent paging coherently via a
+      // bounded, deterministic composite cursor instead of dropping it. The
+      // "previous" breadcrumb for THIS first page is the plain, bounded,
+      // all-origins initial query - carried forward so page 2 can expose an
+      // exact `links.prev` even after some origins become exhausted.
+      const nextCursor = this.encodeMultiOriginCursor(nextByOrigin, this.buildPath(groupType));
+      if (nextCursor) {
+        links['next'] = nextCursor;
+      }
+    }
 
     const result: Page<Group[]> = {
       items: allGroups,
       links,
       totalApis: apis.length,
       successfulApis: successfulApis.length,
-      failedApis: failedApis.length
+      failedApis: failedApis.length,
+      pageSize,
+      totalCount,
+      currentPage,
+      totalPages
     };
 
-    // If ALL APIs failed, include error information
     if (successfulApis.length === 0) {
       result.error = errors.length > 0 ? errors[0].error : new Error('All API endpoints failed to respond');
       result.allApiErrors = errors;
@@ -1459,20 +1778,113 @@ export class RegistryService {
     return result;
   }
 
-  private parseGroupLinkHeader(linkHeader: string): { [key: string]: string } {
-    const links: { [key: string]: string } = {};
-    if (!linkHeader) return links;
+  /**
+   * Resume a merged, multi-origin group listing from a previously encoded
+   * composite cursor. Only the origins that still had a `next` relation are
+   * fetched - already-exhausted origins are correctly skipped - so this
+   * remains a single bounded page per origin and never re-downloads or
+   * recursively prefetches the rest of the registry.
+   *
+   * `links.prev` is deliberately NOT reconstructed from the current fetch's
+   * per-origin `prev` relations: once an origin has dropped out of the
+   * cursor (exhausted on an earlier page), there is no way to recompose that
+   * earlier merged page's content from only the origins active on THIS page.
+   * Instead, `links.prev` is taken directly from the `previous` breadcrumb
+   * carried inside the incoming cursor - the exact cursor (or the initial
+   * `/<groupType>` path) that was used to fetch the page before this one -
+   * so backward navigation deterministically replays that earlier request.
+   */
+  private async listGroupsFromMultiOriginCursor(
+    groupType: string,
+    cursor: string,
+    filter: string | undefined,
+    pageSize: number,
+    mapEntry: (key: string, entry: any, origin: string) => Group,
+    apis: string[]
+  ): Promise<Page<Group[]>> {
+    const decoded = this.decodeMultiOriginCursor(cursor);
+    const origins = decoded.origins;
+    const originApis = Object.keys(origins);
+    const previous = decoded.previous || this.buildPath(groupType);
 
-    linkHeader.split(',').forEach(part => {
-      const match = part.trim().match(/<([^>]+)>;\s*rel="?([a-zA-Z0-9_-]+)"?/i);
-      if (match) {
-        links[match[2]] = match[1];
-        this.debug.log(`Found link relation: ${match[2]} -> ${match[1]}`);
-      } else {
-        this.debug.warn(`Failed to parse link header part: ${part}`);
+    if (originApis.length === 0) {
+      return { items: [], links: { first: this.buildPath(groupType), prev: previous }, totalApis: apis.length, successfulApis: 0, failedApis: 0, pageSize };
+    }
+
+    this.debug.log(`Fetching next bounded page from ${originApis.length} origin(s) via composite cursor for '${groupType}'`);
+
+    const apiRequests = originApis.map(async (api) => {
+      try {
+        // The origin's own Link URL already encodes the correct offset/limit;
+        // only the filter needs to be re-applied to preserve search state.
+        const url = this.addFilterToUrl(origins[api], filter);
+        const response = await lastValueFrom(
+          this.http.get<{ [id: string]: any }>(url, { observe: 'response' as const })
+        );
+        const data = response.body || {};
+        const links = this.parseGroupLinkHeader(response.headers.get('Link') || '');
+        const groups = Object.entries(data).map(([key, entry]) => mapEntry(key, entry, api));
+        return { api, groups, links, success: true, error: null as any };
+      } catch (err) {
+        this.debug.error(`Failed to fetch next groups page from ${api}:`, err);
+        return { api, groups: [] as Group[], links: {} as { [rel: string]: string }, success: false, error: err };
       }
     });
-    return links;
+
+    const results = await Promise.all(apiRequests);
+
+    const allGroups: Group[] = [];
+    const successfulApis: string[] = [];
+    const failedApis: string[] = [];
+    const errors: any[] = [];
+    const nextByOrigin: { [api: string]: string } = {};
+
+    results.forEach(result => {
+      if (result.success) {
+        successfulApis.push(result.api);
+        allGroups.push(...result.groups);
+        if (result.links['next']) {
+          nextByOrigin[result.api] = result.links['next'];
+        }
+      } else {
+        failedApis.push(result.api);
+        if (result.error) {
+          errors.push({ api: result.api, error: result.error });
+        }
+      }
+    });
+
+    const links: { [rel: string]: string } = {
+      // 'first' always returns to the original bounded, all-origins query.
+      first: this.buildPath(groupType),
+      // 'prev' replays the exact cursor/path that produced the page before
+      // this one - never reconstructed from (possibly incomplete) per-origin
+      // data on the current page.
+      prev: previous
+    };
+    // This page's own incoming cursor becomes the "previous" breadcrumb for
+    // the NEXT page, so backward navigation from page N+1 can replay page N
+    // exactly - even if an origin exhausts between now and then.
+    const nextCursor = this.encodeMultiOriginCursor(nextByOrigin, cursor);
+    if (nextCursor) {
+      links['next'] = nextCursor;
+    }
+
+    const result: Page<Group[]> = {
+      items: allGroups,
+      links,
+      totalApis: apis.length,
+      successfulApis: successfulApis.length,
+      failedApis: failedApis.length,
+      pageSize
+    };
+
+    if (successfulApis.length === 0) {
+      result.error = errors.length > 0 ? errors[0].error : new Error('All origins failed to respond');
+      result.allApiErrors = errors;
+    }
+
+    return result;
   }
 
 }
