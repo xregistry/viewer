@@ -1,6 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { Component, OnInit, OnDestroy, CUSTOM_ELEMENTS_SCHEMA, ChangeDetectorRef } from '@angular/core';
-import { ActivatedRoute, RouterModule } from '@angular/router';
+import { ActivatedRoute, Router, RouterModule } from '@angular/router';
 import { Observable, of, switchMap, tap, catchError, map, Subject, takeUntil, interval } from 'rxjs';
 import { RegistryService } from '../../services/registry.service';
 import { ModelService } from '../../services/model.service';
@@ -17,6 +17,7 @@ import { ErrorBoundaryComponent } from '../error-boundary/error-boundary.compone
 import { DeprecationIndicatorComponent } from '../deprecation-indicator/deprecation-indicator.component';
 import { CrossReferenceComponent } from '../cross-reference/cross-reference.component';
 import { UrlDebugComponent } from '../url-debug/url-debug.component';
+import { buildEncodedRoute, getPrimaryRouteSegment } from '../../utils/route.utils';
 
 @Component({
   selector: 'app-resource',
@@ -66,8 +67,21 @@ export class ResourceComponent implements OnInit, OnDestroy {
     private modelService: ModelService,
     private searchService: SearchService,
     private configService: ConfigService,
-    private cdr: ChangeDetectorRef
+    private cdr: ChangeDetectorRef,
+    private router: Router
   ) {}
+
+  versionRoute(versionId: string) {
+    return buildEncodedRoute(
+      this.router,
+      this.groupType,
+      this.groupId,
+      this.resourceType,
+      this.resourceId,
+      'versions',
+      versionId
+    );
+  }
 
   ngOnInit(): void {
     this.route.paramMap.subscribe(params => {
@@ -77,7 +91,11 @@ export class ResourceComponent implements OnInit, OnDestroy {
       this.groupType = params.get('groupType')!;
       this.groupId = params.get('groupId')!;
       this.resourceType = params.get('resourceType')!;
-      this.resourceId = params.get('resourceId')!;
+      this.resourceId = getPrimaryRouteSegment(
+        this.router.parseUrl(this.router.url),
+        3,
+        params.get('resourceId') ?? ''
+      );
 
       // Wait for configuration to be loaded before subscribing to ModelService
       this.waitForConfigAndLoadData();

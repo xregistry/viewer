@@ -1,5 +1,5 @@
 <td class="no-wrap" [title]="getFullText(resource?.name || resource?.id)">
-  <a [routerLink]="[resource && (resource['id'] || resource['name'] || '')]">
+  <a [routerLink]="resourceRoute()">
     {{ truncateText(resource?.name || resource?.id || 'Unknown') }}
   </a>
 </td>
