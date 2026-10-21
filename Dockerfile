@@ -1,7 +1,7 @@
 # Multi-stage build for xRegistry Viewer with Node.js + Express
 
 # Stage 1: Build the Angular application
-FROM node:25-alpine AS builder
+FROM node:26-alpine AS builder
 
 # Install security updates
 RUN apk update && apk upgrade && rm -rf /var/cache/apk/*
@@ -22,7 +22,7 @@ COPY . .
 RUN npm run build-prod
 
 # Stage 2: Production server with Node.js + Express
-FROM node:25-alpine
+FROM node:26-alpine
 
 # Install security updates and remove unnecessary packages
 RUN apk update && \
